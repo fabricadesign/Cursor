@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Fábrica Coffee Roasters — Support Agent")
 
 
+@app.on_event("startup")
+def _restore_inbox_on_boot():
+    n = store.load_disk_backup_if_empty()
+    if n:
+        logger.info("Restored %s conversations from recovered inbox dump", n)
+
+
 # ─── WhatsApp Webhook ────────────────────────────────────────────────
 
 @app.get("/webhook")
@@ -559,19 +566,6 @@ async def admin_new_conversation_page(request: Request):
     except HTTPException:
         return RedirectResponse("/admin/login")
 
-    template_configured = bool(settings.whatsapp_new_conversation_template)
-    template_note = (
-        f'<div class="form-hint">If the customer hasn\'t messaged us in the last 24h, WhatsApp requires opening with '
-        f'the approved template "<strong>{settings.whatsapp_new_conversation_template}</strong>" '
-        f'({settings.whatsapp_template_language}) — your message below can\'t be delivered until they reply to it '
-        f'(WhatsApp rule: only the customer replying opens the window, sending the template does not). It\'s queued '
-        f'automatically and sent the moment they reply. If they messaged us recently, your message goes out immediately instead.</div>'
-        if template_configured else
-        '<div class="error-box">No approved WhatsApp template is configured yet, so this can only message customers who '
-        'contacted us in the last 24 hours (free-form messages are rejected otherwise). Ask Claude to help set up a '
-        'template in Meta Business Manager to enable true cold-start conversations.</div>'
-    )
-
     return f"""<!DOCTYPE html><html><head><title>New conversation — Fabrica Support</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <style>{ADMIN_CSS}</style></head>
@@ -581,8 +575,8 @@ async def admin_new_conversation_page(request: Request):
     <a href="/admin" class="back-link">&#8592; Back to dashboard</a>
     <div class="form-page">
     <h2 style="color:#2d6a4f;margin-bottom:4px">Start a new conversation</h2>
-    <p style="color:#666;font-size:14px">Send the first WhatsApp message to a customer. Bea will handle their replies automatically from then on.</p>
-    {template_note}
+    <p style="color:#666;font-size:14px">Send a normal WhatsApp text to the customer. Bea stays silent until you hand the thread back.</p>
+    <div class="form-hint">This sends the message you type — not a template. WhatsApp only delivers free-form texts if the customer has written to us in the last 24 hours.</div>
     <form method="post" action="/admin/new">
         <label for="phone">Phone number</label>
         <input type="text" id="phone" name="phone" placeholder="e.g. 351912345678 (country code, no + or spaces)" required>
@@ -620,58 +614,31 @@ async def admin_new_conversation_send(
             status_code=400,
         )
 
-    template_configured = bool(settings.whatsapp_new_conversation_template)
-
     if name:
         store.set_customer_name(clean_phone, name)
 
     state = store.get_conversation(clean_phone)
-    window_open = _customer_window_open(state)
 
     try:
-        if window_open:
-            # The customer messaged us within the last 24h, so the free-form
-            # window is already open — send directly, no template needed.
-            await whatsapp.send_message(clean_phone, message)
-            state["messages"].append({"role": "human", "text": message, "ts": store.now_iso()})
-        elif template_configured:
-            # Outside the window: WhatsApp requires opening with an approved
-            # template. Sending a template does NOT itself open the free-form
-            # window though — only the customer replying does — so a
-            # free-form follow-up sent right after would be silently
-            # accepted by the API and then fail to deliver. Instead, queue
-            # the admin's message and flush it for real once their reply
-            # arrives (see receive_message in the webhook handler).
-            await whatsapp.send_template_message(
-                clean_phone,
-                settings.whatsapp_new_conversation_template,
-                settings.whatsapp_template_language,
-            )
-            state["pending_first_message"] = message
-        else:
-            # No template configured and outside the window — this will be
-            # rejected by WhatsApp; surfaced to the admin as an error below.
-            await whatsapp.send_message(clean_phone, message)
-            state["messages"].append({"role": "human", "text": message, "ts": store.now_iso()})
+        # Always send the typed text as a normal WhatsApp message — never a template.
+        resp = await whatsapp.send_message(clean_phone, message)
+        hmsg = {"role": "human", "text": message, "ts": store.now_iso()}
+        wamid = whatsapp.wamid_of(resp)
+        if wamid:
+            hmsg["wamid"] = wamid
+            hmsg["delivery"] = "sent"
+            store.set_wamid(wamid, clean_phone)
+        state["messages"].append(hmsg)
     except Exception as e:
         logger.error("Failed to start conversation with %s: %s", clean_phone, e)
-        if not window_open and template_configured:
-            detail = (
-                "Could not send the opening template message. Double-check the template name/language in .env "
-                "match what was approved in Meta Business Manager."
-            )
-        elif not window_open:
-            detail = (
-                "Could not send the message via WhatsApp. This usually means the customer hasn't messaged us in the "
-                "last 24 hours, so WhatsApp requires an approved message template to start the conversation instead "
-                "of a free-form message."
-            )
-        else:
-            detail = "Could not send the message via WhatsApp. Double-check the phone number and try again."
+        detail = (
+            "Could not send that WhatsApp text. If the customer has not messaged us in the last "
+            "24 hours, Meta will reject a free-form message. Ask them to write first, then send again."
+        )
         return HTMLResponse(
             f"""<!DOCTYPE html><html><head><style>{ADMIN_CSS}</style></head><body>
             <div class="container">
-            <div class="error-box">{detail}<br><br><strong>Details:</strong> {e}</div>
+            <div class="error-box">{detail}<br><br><strong>Details:</strong> {html.escape(str(e))}</div>
             <a href="/admin/new" class="back-link">&#8592; Back</a></div></body></html>""",
             status_code=502,
         )
@@ -682,7 +649,7 @@ async def admin_new_conversation_send(
     state["mode"] = "human"
     store.save_conversation(clean_phone, state)
 
-    logger.info("Admin started new conversation with %s (window_open=%s)", clean_phone, window_open)
+    logger.info("Admin started new conversation with %s (free-form text)", clean_phone)
     return RedirectResponse(f"/admin/chat/{clean_phone}", status_code=302)
 
 

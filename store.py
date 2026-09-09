@@ -304,3 +304,42 @@ def list_all() -> list[dict]:
     results.sort(key=lambda c: c["last_ts"] or "", reverse=True)
     results.sort(key=lambda c: c["mode"] != "human")
     return results
+
+
+BACKUP_PATH = __import__("os").path.join(__import__("os").path.dirname(__file__), "data", "recovered_conversations.json")
+
+
+def import_conversations(conversations: dict, overwrite: bool = True) -> int:
+    """Write recovered threads into Redis or the in-memory store."""
+    loaded = 0
+    for phone, state in (conversations or {}).items():
+        if not phone or not isinstance(state, dict):
+            continue
+        existing = get_conversation(phone)
+        if existing.get("messages") and not overwrite:
+            if len(existing.get("messages") or []) >= len(state.get("messages") or []):
+                continue
+        merged = {**_default_state(), **state}
+        merged["messages"] = state.get("messages") or []
+        save_conversation(phone, merged)
+        loaded += 1
+    return loaded
+
+
+def load_disk_backup_if_empty() -> int:
+    """If this process has no conversations, restore the recovered inbox dump."""
+    if list_all():
+        return 0
+    import os
+    path = BACKUP_PATH
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    convs = payload.get("conversations") if isinstance(payload, dict) else None
+    if not convs:
+        return 0
+    return import_conversations(convs, overwrite=True)
