@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -83,6 +84,15 @@ class Settings(BaseSettings):
     smtp_from: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator("alert_whatsapp_number", mode="before")
+    @classmethod
+    def default_desk_number(cls, value: str | None) -> str:
+        # Vercel often stores ALERT_WHATSAPP_NUMBER as an empty string, which
+        # would otherwise override the default and skip the desk ping entirely.
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return "+351912338809"
 
 
 settings = Settings()
