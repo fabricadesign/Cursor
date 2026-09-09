@@ -128,10 +128,12 @@ async def receive_message(request: Request):
     except Exception as e:
         import traceback
         logger.error("Error processing message from %s: %s\n%s", phone, repr(e), traceback.format_exc())
-        await whatsapp.send_message(
-            phone,
-            "Pedimos desculpa, ocorreu um erro. Por favor tente novamente. / Sorry, an error occurred. Please try again.",
-        )
+        # Never send an error apology over a thread a human already owns.
+        if store.get_mode(phone) != "human":
+            await whatsapp.send_message(
+                phone,
+                "Pedimos desculpa, ocorreu um erro. Por favor tente novamente. / Sorry, an error occurred. Please try again.",
+            )
 
     return {"status": "ok"}
 
@@ -907,8 +909,8 @@ async def admin_delete_conversation(phone: str, request: Request):
 
 @app.api_route("/tasks/poll-email", methods=["GET", "POST"])
 async def poll_email(request: Request, secret: str = Query("")):
-    """Check the support mailbox for new emails and let Bea answer them.
-    Secured by a shared secret so only our scheduler can trigger it."""
+    """Check the support mailbox for new emails and file them for the team.
+    Bea does not reply on email. Secured by a shared secret so only our scheduler can trigger it."""
     if secret != settings.email_poll_secret:
         return Response(status_code=403)
     try:
@@ -947,7 +949,8 @@ async def admin_problems(request: Request):
 
     # Recent incidents log
     _labels = {"whatsapp_failed": "WhatsApp not delivered", "email_poll": "Email check failed",
-               "send_failed": "Send failed", "health": "Health check"}
+               "send_failed": "Send failed", "health": "Health check",
+               "whatsapp_alert": "Desk ping failed"}
     if incidents:
         irows = ""
         for inc in incidents:

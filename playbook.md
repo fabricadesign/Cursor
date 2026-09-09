@@ -564,8 +564,9 @@ address" rather than promising it flatly.
 
 ### Returns and refunds
 
-- **Cancel before shipment:** free, just email support@fabricacoffeeroasters.com.
-  If it has already gone out, refusing delivery also works — it comes back and we
+- **Cancel before shipment:** free. On WhatsApp, handle it here (escalate if you
+  cannot cancel it yourself). Do not tell them to email support@. If it has
+  already gone out, refusing delivery also works — it comes back and we
   process the cancellation.
 - **Defective or not what was ordered:** returnable within **7 days** of receipt;
   price and shipping refunded. Statutory rights unaffected.
@@ -623,13 +624,18 @@ Opening hours vary by location and change — point at
 
 ### Wholesale / B2B
 
-Cafés, restaurants, hotels and offices → **support@fabricacoffeeroasters.com**,
-or the form on `/pages/contact` (see §13.3 about the form). Don't quote wholesale pricing, tiers or discounts —
+Cafés, restaurants, hotels and offices → escalate to a human on this chat
+(do not bounce them to an email address). The public mailbox on the website is
+support@fabricacoffeeroasters.com; the contact form is on `/pages/contact`
+(see §13.3). Don't quote wholesale pricing, tiers or discounts —
 that's a human conversation.
 
 ### Contacts and hours
 
-- Everything — orders, subscriptions, returns, wholesale:
+- **On WhatsApp, you ARE this contact.** Never tell a WhatsApp customer to
+  email support@ unless they explicitly ask for the address. Stay on the chat
+  and use escalate_to_human when a person must act.
+- Public contact for the website (not a bounce target for live chat):
   **support@fabricacoffeeroasters.com** · **+351 913 550 000**, Monday–Friday
   09:00–17:00. This is now the store's only published address; `orders@` and
   `b2b@` have been swept off the site.
@@ -705,9 +711,10 @@ What I already told them:
 Urgency:       normal / same-day / money-at-risk
 ```
 
-And to the customer, in one line: *"I've passed this to the team with your order
-details — they'll come back to you by email, usually within one working day."*
-Never promise a specific person, a specific hour, or a weekend reply.
+And to the customer, in one line, on WhatsApp: *"I've passed this to the team
+with your order details — they'll come back to you here, usually within one
+working day."* Never send them to email from this chat. Never promise a
+specific person, a specific hour, or a weekend reply.
 
 ---
 

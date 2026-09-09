@@ -1,9 +1,12 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # Anthropic
-    anthropic_api_key: str
+    # Anthropic — the key is the sk-ant-… secret. ANTHROPIC_MODEL is the
+    # product name from the Anthropic console (e.g. claude-sonnet-4-6), not
+    # another key.
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-4-6"
 
     # Shopify (Dev Dashboard — Client Credentials flow)
     shopify_store_domain: str = ""
@@ -53,9 +56,16 @@ class Settings(BaseSettings):
     whatsapp_new_conversation_template: str = ""
     whatsapp_template_language: str = "pt_PT"
 
-    # Escalation alerts
+    # Escalation alerts. Desk handset that should receive the WhatsApp ping
+    # when a conversation turns red ("needs human"). Empty used to silently
+    # skip the ping. Default is the Fábrica desk number.
     alert_email_to: str = "info@fabricacoffeeroasters.com"
-    alert_whatsapp_number: str = ""
+    alert_whatsapp_number: str = "+351912338809"
+    # Approved Meta template for that desk ping. Session (free-form) texts
+    # fail with Graph 131047 once 24h have passed since the desk last replied
+    # to the business number. Leave blank to try the new-conversation template
+    # next, then a session text as last resort.
+    whatsapp_escalation_template: str = ""
 
     # Upstash Redis (for conversation history & human takeover)
     # Vercel auto-sets KV_REST_API_URL and KV_REST_API_TOKEN
@@ -72,7 +82,7 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = ""
 
-    model_config = {"env_file": ".env"}
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 settings = Settings()

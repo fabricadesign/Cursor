@@ -1,11 +1,12 @@
-"""Email support pipeline: fetch new support emails, let Bea answer them, and
-reply by email — mirroring the WhatsApp webhook flow but for the email channel.
+"""Email support pipeline: fetch new support emails and file them for humans.
+
+Bea never auto-replies on email. Incoming mail is stored as a human-mode
+conversation so the team can answer from the admin dashboard.
 """
 
 import logging
 import email_client
 import store
-import agent
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +41,12 @@ def store_support_address() -> str:
 
 
 async def process_new_emails(limit: int = 10) -> dict:
-    """Fetch unseen support emails, have Bea answer each, and reply by email.
-
-    Returns a small summary for logging/monitoring.
-    """
+    """Fetch unseen support emails and store each for the team. No Bea reply."""
     if not email_client.configured():
         return {"status": "email_not_configured"}
 
     emails = email_client.fetch_new_emails(limit=limit)
-    processed, skipped, replied, human = 0, 0, 0, 0
+    processed, skipped, human = 0, 0, 0
 
     for mail in emails:
         sender = mail["from_email"]
@@ -57,9 +55,6 @@ async def process_new_emails(limit: int = 10) -> dict:
             continue
         processed += 1
 
-        # EMAIL IS HUMAN-ONLY: Bea never auto-replies to email. We just store the
-        # incoming message as an email conversation in HUMAN mode, so it shows in
-        # the dashboard (Email tab + Needs human) for the team to reply to.
         state = store.get_conversation(sender)
         state["channel"] = "email"
         state["mode"] = "human"
@@ -78,6 +73,7 @@ async def process_new_emails(limit: int = 10) -> dict:
         })
         store.save_conversation(sender, state)
         human += 1
+        logger.info("Email from %s stored for the team (Bea silent)", sender)
 
     return {
         "status": "ok",
@@ -85,4 +81,5 @@ async def process_new_emails(limit: int = 10) -> dict:
         "processed": processed,
         "skipped": skipped,
         "stored_for_team": human,
+        "replied": 0,
     }

@@ -9,9 +9,11 @@ from subscription import subscription_prompt_section
 from coffee import coffee_prompt_section
 from brewing import brewing_prompt_section
 from humano import humano_prompt_section
+from guardrails import scrub_support_mailbox_deflection, should_agent_speak
 import store
 
 client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+MODEL = settings.anthropic_model or "claude-sonnet-4-6"
 
 SYSTEM_PROMPT = """You are Bea, a friendly, professional customer support assistant for Fábrica Coffee Roasters.
 You help customers with their orders, shipping, and general inquiries.
@@ -39,6 +41,9 @@ Your job is to resolve the customer's issue yourself whenever the tools availabl
 - Try every relevant tool and a reasonable variation of the search (e.g. if an order number doesn't match, try the customer's email or find_customer; if a product search comes back empty, try a broader or different keyword).
 - Actually answer the question using the data you get back — don't hedge or ask the customer to "contact support" for something you can look up yourself.
 - Only fall back to escalation for the specific cases listed below, where a human genuinely has to act (a refund, a policy exception, a complaint you have no tool to fix). Being unsure is not one of them — if you're unsure, look it up.
+
+## WhatsApp is already support — do not bounce to email
+On WhatsApp you ARE Fábrica support. NEVER tell a WhatsApp customer to email support@fabricacoffeeroasters.com, orders@, or b2b@. That sends them away from a conversation you can already handle. The playbook lists that address as the public contact for the website — it is not an instruction to redirect live chat. If the customer explicitly asks for the email address, you may give support@fabricacoffeeroasters.com. For wholesale, refunds, or anything a human must do, use the escalate_to_human tool and stay on this chat.
 
 ## If a customer asks whether you are an AI / a bot / a real person
 Answer briefly and honestly: confirm you're Bea, Fábrica's virtual assistant, in one warm, professional sentence, then steer back to helping them. Don't dwell on it or get clinical about it. Example: "Sou a Bea, a assistente virtual da Fábrica — e estou aqui para ajudar! Em que posso ser útil?" / "I'm Bea, Fábrica's virtual assistant — happy to help! What can I do for you?"
@@ -153,16 +158,25 @@ async def chat(phone_number: str, user_message: str, media: dict | None = None,
     (e.g. an invoice PDF is emailed for email conversations, sent on WhatsApp otherwise).
     """
     state = store.get_conversation(phone_number)
-    state["channel"] = channel
     customer_msg = {"role": "customer", "text": user_message, "ts": store.now_iso()}
     if media:
         customer_msg["media"] = media
 
-    # If in human mode, just store the message (human will see it in admin)
-    if state["mode"] == "human":
+    # Email is human-only. Human-mode WhatsApp stays silent until handback.
+    if not should_agent_speak(
+        "email" if (channel == "email" or state.get("channel") == "email") else "whatsapp",
+        "human" if (channel == "email" or state.get("channel") == "email") else state.get("mode", "agent"),
+    ):
+        if channel == "email" or state.get("channel") == "email":
+            state["channel"] = "email"
+            state["mode"] = "human"
+            if not state.get("escalation_summary"):
+                state["escalation_summary"] = "Email — waiting for the team"
         state["messages"].append(customer_msg)
         store.save_conversation(phone_number, state)
         return None
+
+    state["channel"] = channel
 
     # Build Claude messages from the most recent history (full history is kept
     # in storage for the dashboard; only the recent part is sent to the LLM).
@@ -221,28 +235,13 @@ async def chat(phone_number: str, user_message: str, media: dict | None = None,
     # every message; the tiny date block follows it, uncached.
     today = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
     context_note = f"Today's date is {today}."
-    if channel == "email":
-        context_note += (
-            "\n\nThis conversation is over EMAIL, and you ARE the support@fabricacoffeeroasters.com "
-            "mailbox — the customer emailed us and you are replying from that same address. "
-            "Therefore NEVER tell the customer to 'email support@fabricacoffeeroasters.com' or "
-            "'contact orders@fabricacoffeeroasters.com' — that is circular, they are already "
-            "talking to the support inbox. To escalate or hand something to a human, use the "
-            "escalate_to_human tool and simply tell the customer that our team will follow up "
-            "by email shortly (usually within one working day). You may still give the phone "
-            "number (+351 913 550 000) if they'd prefer to call.\n\n"
-            "Use a slightly more formal, structured register than WhatsApp: open with a brief "
-            "greeting (use the customer's name if known), write in clear short paragraphs, and "
-            "close courteously. Do NOT add a sign-off or signature yourself — a Fábrica signature "
-            "is appended automatically. Keep the same language as the customer."
-        )
     dated_system = [
         {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": context_note},
     ]
 
     response = await client.messages.create(
-        model="claude-sonnet-4-6",
+        model=MODEL,
         max_tokens=1024,
         system=dated_system,
         tools=TOOL_DEFINITIONS,
@@ -267,7 +266,7 @@ async def chat(phone_number: str, user_message: str, media: dict | None = None,
         # claude_messages for this turn, not persisted to display history.
 
         response = await client.messages.create(
-            model="claude-sonnet-4-6",
+            model=MODEL,
             max_tokens=1024,
             system=dated_system,
             tools=TOOL_DEFINITIONS,
@@ -279,21 +278,10 @@ async def chat(phone_number: str, user_message: str, media: dict | None = None,
         if hasattr(block, "text"):
             assistant_text += block.text
 
-    # Safety net for the email channel: Bea is the support inbox, so telling the
-    # customer to email support@/orders@/b2b@ is circular. Rewrite any such
-    # address to a "just reply to this email" phrasing, in case the reply slipped
-    # one through despite the instruction above.
-    if channel == "email" and assistant_text:
-        import re as _re
-        assistant_text = _re.sub(
-            r"(?:por favor,?\s+|please\s+)?\b(?:e-?mail|email|contacte?|contact|escreva\s+para|write\s+to|reach\s+out\s+to)\s+(?:us\s+at\s+|nos\s+para\s+)?(?:support|orders|b2b)@fabricacoffeeroasters\.com",
-            "reply directly to this email",
-            assistant_text, flags=_re.IGNORECASE,
-        )
-        # Catch any remaining bare address mentions.
-        assistant_text = _re.sub(
-            r"\b(?:support|orders|b2b)@fabricacoffeeroasters\.com",
-            "this email address", assistant_text, flags=_re.IGNORECASE,
+    # Safety net: never bounce a WhatsApp customer to the support mailbox.
+    if assistant_text:
+        assistant_text, _ = scrub_support_mailbox_deflection(
+            assistant_text, user_message
         )
 
     # Check if escalation was triggered during tool execution
