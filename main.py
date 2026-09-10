@@ -444,15 +444,32 @@ def _parse_iso(ts: str):
         return None
 
 
-def _customer_window_open(state: dict) -> bool:
-    """Whether WhatsApp's 24h free-form messaging window is currently open —
-    true only if the customer has messaged us within the last 24h. Sending a
-    template does NOT open this window; only the customer replying does."""
-    for msg in reversed(state.get("messages", [])):
-        if msg.get("role") == "customer":
-            ts = _parse_iso(msg.get("ts", ""))
-            return bool(ts and (datetime.now(timezone.utc) - ts) < timedelta(hours=24))
-    return False
+async def _send_human_whatsapp_text(phone: str, message: str, state: dict) -> None:
+    """Send the typed text as a normal WhatsApp message. Never a template."""
+    resp = await whatsapp.send_message(phone, message)
+    hmsg = {"role": "human", "text": message, "ts": store.now_iso()}
+    wamid = whatsapp.wamid_of(resp)
+    if wamid:
+        hmsg["wamid"] = wamid
+        hmsg["delivery"] = "sent"
+        store.set_wamid(wamid, phone)
+    state["messages"].append(hmsg)
+    state["pending_first_message"] = ""
+
+
+def _whatsapp_send_error_page(phone: str, exc: Exception, back: str) -> HTMLResponse:
+    detail = (
+        "WhatsApp did not accept that as a normal text. This usually means the customer "
+        "has not messaged +351 913 550 000 in the last 24 hours. We will not send a template. "
+        "Ask them to write first, then send again."
+    )
+    return HTMLResponse(
+        f"""<!DOCTYPE html><html><head><style>{ADMIN_CSS}</style></head><body>
+        <div class="container">
+        <div class="error-box">{detail}<br><br><strong>Details:</strong> {html.escape(str(exc))}</div>
+        <a href="{html.escape(back)}" class="back-link">&#8592; Back</a></div></body></html>""",
+        status_code=502,
+    )
 
 
 @app.get("/admin/analytics", response_class=HTMLResponse)
@@ -576,7 +593,7 @@ async def admin_new_conversation_page(request: Request):
     <div class="form-page">
     <h2 style="color:#2d6a4f;margin-bottom:4px">Start a new conversation</h2>
     <p style="color:#666;font-size:14px">Send a normal WhatsApp text to the customer. Bea stays silent until you hand the thread back.</p>
-    <div class="form-hint">This sends the message you type — not a template. WhatsApp only delivers free-form texts if the customer has written to us in the last 24 hours.</div>
+    <div class="form-hint">Sends the exact text you type. No WhatsApp template. If this number has not written to us in the last 24 hours, Meta will reject the send — ask them to message +351 913 550 000 first.</div>
     <form method="post" action="/admin/new">
         <label for="phone">Phone number</label>
         <input type="text" id="phone" name="phone" placeholder="e.g. 351912345678 (country code, no + or spaces)" required>
@@ -620,28 +637,10 @@ async def admin_new_conversation_send(
     state = store.get_conversation(clean_phone)
 
     try:
-        # Always send the typed text as a normal WhatsApp message — never a template.
-        resp = await whatsapp.send_message(clean_phone, message)
-        hmsg = {"role": "human", "text": message, "ts": store.now_iso()}
-        wamid = whatsapp.wamid_of(resp)
-        if wamid:
-            hmsg["wamid"] = wamid
-            hmsg["delivery"] = "sent"
-            store.set_wamid(wamid, clean_phone)
-        state["messages"].append(hmsg)
+        await _send_human_whatsapp_text(clean_phone, message, state)
     except Exception as e:
         logger.error("Failed to start conversation with %s: %s", clean_phone, e)
-        detail = (
-            "Could not send that WhatsApp text. If the customer has not messaged us in the last "
-            "24 hours, Meta will reject a free-form message. Ask them to write first, then send again."
-        )
-        return HTMLResponse(
-            f"""<!DOCTYPE html><html><head><style>{ADMIN_CSS}</style></head><body>
-            <div class="container">
-            <div class="error-box">{detail}<br><br><strong>Details:</strong> {html.escape(str(e))}</div>
-            <a href="/admin/new" class="back-link">&#8592; Back</a></div></body></html>""",
-            status_code=502,
-        )
+        return _whatsapp_send_error_page(clean_phone, e, "/admin/new")
 
     # A human started this conversation, so keep it in HUMAN mode — Bea must
     # not jump in. The team handles it; they can "Hand back to Agent" later if
@@ -728,8 +727,17 @@ async def admin_chat_page(phone: str, request: Request, edit: int = None, send_e
         <div><strong style="font-size:17px">{customer_name}</strong> &nbsp;<span style="color:#999">{phone}</span> &nbsp; {mode_badge}</div>
     </div>
     <div class="info-bar">{('<strong>Case:</strong> ' + state.get('escalation_summary', '')) if mode == 'human' and state.get('escalation_summary') else ('You (the team) are handling this conversation — Bea is paused. Use “Hand back to Agent” to let Bea take over.' if mode == 'human' else 'Bea is currently handling this conversation. Sending a message below will take it over.')}</div>
-    {'<div class="error-box">Could not send that message via WhatsApp. Please try again in a moment.</div>' if send_error else ''}
-    {f'<div class="error-box" style="background:#fff8e1;border-color:#f0c14b;color:#7a5c00">&#9203; Queued — the customer hasn\'t replied yet, so this can\'t be delivered until they do (WhatsApp only opens the free-form window when they reply). It will be sent automatically the moment they message us: <br><br><em>{html.escape(state["pending_first_message"])}</em></div>' if state.get("pending_first_message") else ""}
+    {'<div class="error-box">Could not send that as a normal WhatsApp text. If they have not messaged us in the last 24 hours, Meta blocks free-form messages — we will not send a template.</div>' if send_error else ''}
+    {f'''<div class="error-box" style="background:#fff8e1;border-color:#f0c14b;color:#7a5c00">This text is waiting to go out as a <strong>normal message</strong> (no template) as soon as the customer writes to us:<br><br><em>{html.escape(state["pending_first_message"])}</em>
+        <div class="btn-row" style="margin-top:10px">
+            <form method="post" action="/admin/chat/{phone}/send-queued" style="display:inline">
+                <button type="submit" class="btn btn-send">Send as normal text now</button>
+            </form>
+            <form method="post" action="/admin/chat/{phone}/discard-queue" style="display:inline">
+                <button type="submit" class="btn btn-delete">Discard</button>
+            </form>
+        </div>
+    </div>''' if state.get("pending_first_message") else ""}
     <div class="chat-box" id="chatbox">{chat_html or '<p style="color:#888;text-align:center">No messages yet</p>'}</div>
     <form method="post" action="/admin/chat/{phone}/send" class="reply-form">
         <textarea id="reply" name="message" rows="3" placeholder="Type your reply to the customer..." required></textarea>
@@ -777,34 +785,8 @@ async def admin_send_message(phone: str, request: Request, message: str = Form()
         store.save_conversation(phone, state)
         return RedirectResponse(f"/admin/chat/{phone}", status_code=302)
 
-    window_open = _customer_window_open(state)
-    template_configured = bool(settings.whatsapp_new_conversation_template)
-
     try:
-        if window_open:
-            resp = await whatsapp.send_message(phone, message)
-            hmsg = {"role": "human", "text": message, "ts": store.now_iso()}
-            wamid = whatsapp.wamid_of(resp)
-            if wamid:
-                hmsg["wamid"] = wamid
-                hmsg["delivery"] = "sent"
-                store.set_wamid(wamid, phone)
-            state["messages"].append(hmsg)
-        elif template_configured:
-            # The customer's gone quiet 24h+ — a free-form send here would be
-            # silently accepted by WhatsApp and then fail to deliver (only
-            # the customer replying re-opens the window, not us messaging
-            # them). Re-open with the template and queue this reply to go
-            # out the moment they respond (flushed in receive_message).
-            await whatsapp.send_template_message(
-                phone,
-                settings.whatsapp_new_conversation_template,
-                settings.whatsapp_template_language,
-            )
-            state["pending_first_message"] = message
-        else:
-            await whatsapp.send_message(phone, message)
-            state["messages"].append({"role": "human", "text": message, "ts": store.now_iso()})
+        await _send_human_whatsapp_text(phone, message, state)
     except Exception as e:
         logger.error("Failed to send WhatsApp to %s: %s", phone, e)
         store.log_incident("send_failed", f"WhatsApp to {phone}: {e}")
@@ -816,6 +798,42 @@ async def admin_send_message(phone: str, request: Request, message: str = Form()
     state["mode"] = "human"
     store.save_conversation(phone, state)
 
+    return RedirectResponse(f"/admin/chat/{phone}", status_code=302)
+
+
+@app.post("/admin/chat/{phone}/send-queued")
+async def admin_send_queued(phone: str, request: Request):
+    try:
+        _check_auth(request)
+    except HTTPException:
+        return RedirectResponse("/admin/login")
+
+    state = store.get_conversation(phone)
+    pending = (state.get("pending_first_message") or "").strip()
+    if not pending:
+        return RedirectResponse(f"/admin/chat/{phone}", status_code=302)
+    try:
+        await _send_human_whatsapp_text(phone, pending, state)
+    except Exception as e:
+        logger.error("Failed to send queued WhatsApp text to %s: %s", phone, e)
+        store.log_incident("send_failed", f"WhatsApp queued to {phone}: {e}")
+        store.save_conversation(phone, state)
+        return RedirectResponse(f"/admin/chat/{phone}?send_error=1", status_code=302)
+    state["mode"] = "human"
+    store.save_conversation(phone, state)
+    return RedirectResponse(f"/admin/chat/{phone}", status_code=302)
+
+
+@app.post("/admin/chat/{phone}/discard-queue")
+async def admin_discard_queue(phone: str, request: Request):
+    try:
+        _check_auth(request)
+    except HTTPException:
+        return RedirectResponse("/admin/login")
+
+    state = store.get_conversation(phone)
+    state["pending_first_message"] = ""
+    store.save_conversation(phone, state)
     return RedirectResponse(f"/admin/chat/{phone}", status_code=302)
 
 
