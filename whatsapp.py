@@ -112,11 +112,18 @@ def extract_statuses(webhook_body: dict) -> list[dict]:
         return out
     for st in value.get("statuses", []):
         errors = st.get("errors") or []
+        title = ""
+        code = None
+        if errors:
+            title = errors[0].get("title") or errors[0].get("message") or ""
+            code = errors[0].get("code")
+        error = f"{title} ({code})" if (title and code) else (title or (str(code) if code else ""))
         out.append({
             "id": st.get("id", ""),
             "status": st.get("status", ""),  # sent | delivered | read | failed
             "recipient": st.get("recipient_id", ""),
-            "error": (errors[0].get("title", "") if errors else ""),
+            "error": error,
+            "error_code": code,
         })
     return out
 

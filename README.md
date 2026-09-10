@@ -17,7 +17,7 @@ uvicorn main:app --host 127.0.0.1 --port 43124
 Admin: `http://127.0.0.1:43124/admin`
 
 ```bash
-python -m unittest tests.test_guardrails
+python -m unittest tests.test_guardrails tests.test_runtime_silence tests.test_delivery
 ```
 
 ## Credentials
@@ -34,3 +34,5 @@ Desk WhatsApp ping on escalate goes to `ALERT_WHATSAPP_NUMBER` (default `+351 91
 - WhatsApp replies that tell the customer to email `support@…` are stripped.
 - Human takeover already muted Bea; error apologies no longer talk over a human thread.
 - Desk escalation ping defaults to the desk number and prefers a WhatsApp template.
+- Starting or continuing a chat never sends a WhatsApp template.
+- Free-form WhatsApp texts are **not** sent if the customer has not written in 24 hours (Meta error 131047 / “Re-engagement message”). They are queued and flushed when the customer messages. The inbox no longer tells the team to resend a message Meta will reject again.

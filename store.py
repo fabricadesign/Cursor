@@ -5,7 +5,7 @@ Falls back to in-memory dict when Redis is not configured.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from config import settings
 
 _memory_store: dict[str, dict] = {}
@@ -87,16 +87,47 @@ def get_incidents() -> list[dict]:
 _INDEX_KEY = "conv_index"
 
 
+def customer_window_open(state: dict, now: datetime | None = None) -> bool:
+    """True when a customer inbound in this thread is still inside Meta's 24h window.
+
+    WhatsApp Cloud API only delivers a free-form text inside that window.
+    A template does not open it — only the customer messaging the WABA does.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=24)
+    for msg in reversed(state.get("messages") or []):
+        if msg.get("role") != "customer":
+            continue
+        raw = msg.get("ts") or ""
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        return dt >= cutoff
+    return False
+
+
 def _summary_from_state(state: dict) -> dict:
     """Build the lightweight dashboard summary stored in the index."""
     messages = state.get("messages", [])
     last_delivery = ""
+    last_delivery_error = ""
+    last_customer_ts = ""
+    found_outbound = False
     for m in reversed(messages):
-        if m.get("role") in ("assistant", "human"):
-            last_delivery = m.get("delivery", "")
+        if not found_outbound and m.get("role") in ("assistant", "human"):
+            last_delivery = m.get("delivery") or ""
+            last_delivery_error = m.get("delivery_error") or ""
+            found_outbound = True
+        if not last_customer_ts and m.get("role") == "customer":
+            last_customer_ts = m.get("ts") or ""
+        if found_outbound and last_customer_ts:
             break
     return {
         "last_delivery": last_delivery,
+        "last_delivery_error": last_delivery_error,
         "name": state.get("customer_name", ""),
         "mode": state.get("mode", "agent"),
         "channel": state.get("channel", "whatsapp"),
@@ -104,6 +135,7 @@ def _summary_from_state(state: dict) -> dict:
         "summary": state.get("escalation_summary", ""),
         "message_count": len(messages),
         "last_customer_text": _last_customer_text(messages),
+        "last_customer_ts": last_customer_ts,
         "last_ts": messages[-1].get("ts", "") if messages else "",
         "created_ts": messages[0].get("ts", "") if messages else "",
         "escalations": state.get("escalations", []),
@@ -193,7 +225,7 @@ def get_wamid_phone(wamid: str) -> str:
     return _wamid_map.get(wamid, "")
 
 
-def update_message_delivery(phone: str, wamid: str, status: str) -> bool:
+def update_message_delivery(phone: str, wamid: str, status: str, error: str = "") -> bool:
     """Set the delivery status on the stored message with this wamid.
     Never downgrades (read stays read) except a 'failed' always wins."""
     state = get_conversation(phone)
@@ -202,6 +234,10 @@ def update_message_delivery(phone: str, wamid: str, status: str) -> bool:
             cur = msg.get("delivery", "")
             if status == "failed" or _DELIVERY_RANK.get(status, 0) >= _DELIVERY_RANK.get(cur, 0):
                 msg["delivery"] = status
+                if error:
+                    msg["delivery_error"] = error
+                elif status != "failed":
+                    msg.pop("delivery_error", None)
                 save_conversation(phone, state)
                 return True
             return False
@@ -297,6 +333,8 @@ def list_all() -> list[dict]:
             "created_ts": s.get("created_ts", ""),
             "escalations": s.get("escalations", []),
             "last_delivery": s.get("last_delivery", ""),
+            "last_delivery_error": s.get("last_delivery_error", ""),
+            "last_customer_ts": s.get("last_customer_ts", ""),
         })
 
     # Most recent activity first, then bring escalated (human) chats to the top
